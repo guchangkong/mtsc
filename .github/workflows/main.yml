@@ -221,17 +221,12 @@ jobs:
           total_written = 0
           valid_rules = 0
           skipped_rules = 0
-          MAX_TOTAL_TARGETS = 8000000
-          capped = False
           seen = set()
 
           with open(output_file, "w", encoding="utf-8") as fout:
               if os.path.exists(input_file):
                   with open(input_file, "r", encoding="utf-8") as fin:
                       for line_num, raw in enumerate(fin, 1):
-                          if total_written >= MAX_TOTAL_TARGETS:
-                              capped = True
-                              break
                           line = raw.strip()
                           if not line or line.startswith("#"):
                               continue
@@ -276,9 +271,6 @@ jobs:
                                           continue
 
                                       for int_ip in range(int(start_ip), int(end_ip) + 1):
-                                          if total_written >= MAX_TOTAL_TARGETS:
-                                              capped = True
-                                              break
                                           ip_str = str(ipaddress.IPv4Address(int_ip))
                                           for port in ports:
                                               target = f"{ip_str}:{port}"
@@ -286,9 +278,6 @@ jobs:
                                                   seen.add(target)
                                                   fout.write(target + "\n")
                                                   total_written += 1
-                                                  if total_written >= MAX_TOTAL_TARGETS:
-                                                      capped = True
-                                                      break
 
                                       valid_rules += 1
                                       continue
@@ -312,9 +301,6 @@ jobs:
                                   hosts = network.hosts()
 
                               for ip in hosts:
-                                  if total_written >= MAX_TOTAL_TARGETS:
-                                      capped = True
-                                      break
                                   ip_str = str(ip)
                                   for port in ports:
                                       target = f"{ip_str}:{port}"
@@ -322,9 +308,6 @@ jobs:
                                           seen.add(target)
                                           fout.write(target + "\n")
                                           total_written += 1
-                                          if total_written >= MAX_TOTAL_TARGETS:
-                                              capped = True
-                                              break
 
                               valid_rules += 1
 
@@ -332,8 +315,6 @@ jobs:
                               skipped_rules += 1
                               print(f"❌ Line {line_num}: invalid IP/CIDR format", file=sys.stderr)
 
-                  if capped:
-                      print(f"⚠️ 待测展开总目标数已达到单次虚拟机内存安全上限 ({MAX_TOTAL_TARGETS:,} 条)，其余已自动截断保护")
                   print(f"[*] 规则解析完成 (已脱敏隐藏具体网段): 有效规则 {valid_rules} 条 | 超限/异常跳过 {skipped_rules} 条")
 
               fetch_online = os.getenv("FETCH_ONLINE", "false").lower() == "true"
