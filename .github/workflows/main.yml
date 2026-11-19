@@ -15,7 +15,15 @@ on:
       custom_shards:
         description: '自定义分片机器数 (选 custom 时生效，范围 1~20)'
         required: false
-        default: '4'
+        default: '20'
+      output_mode:
+        description: '输出结果保存模式'
+        required: false
+        type: choice
+        options:
+          - 'merge (合并去重: 保活复测历史池并与本次新发现合并)'
+          - 'overwrite (覆盖最新: 仅保留本次扫描新结果，丢弃历史存活池)'
+        default: 'merge (合并去重: 保活复测历史池并与本次新发现合并)'
       protocol:
         description: '探测协议模式'
         required: false
@@ -68,9 +76,9 @@ on:
         required: false
         default: '1080'
       workers:
-        description: '每台机器并发 Goroutine 数 (推荐 1000~2000)'
+        description: '每台机器并发 Goroutine 数 (推荐 1000~3000)'
         required: false
-        default: '1000'
+        default: '3000'
       timeout:
         description: '超时时间 (推荐 2s~3s 极速过滤)'
         required: false
@@ -101,14 +109,14 @@ jobs:
         id: calc-matrix
         env:
           SHARDS_PRESET: ${{ github.event.inputs.shards_preset || '4' }}
-          CUSTOM_SHARDS: ${{ github.event.inputs.custom_shards || '4' }}
+          CUSTOM_SHARDS: ${{ github.event.inputs.custom_shards || '20' }}
         run: |
           python3 - <<'EOF'
           import json
           import os
 
           preset = os.getenv("SHARDS_PRESET", "4")
-          custom = os.getenv("CUSTOM_SHARDS", "4")
+          custom = os.getenv("CUSTOM_SHARDS", "20")
 
           if "8" in preset:
               shards = 8
@@ -116,7 +124,7 @@ jobs:
               try:
                   shards = int(custom)
               except ValueError:
-                  shards = 4
+                  shards = 20
           else:
               shards = 4
 
@@ -414,7 +422,7 @@ jobs:
           RAW_PROTO: ${{ github.event.inputs.protocol || 'all' }}
           RAW_DICT: ${{ github.event.inputs.dict_mode || 'fast' }}
           IN_SHUFFLE: ${{ github.event.inputs.shuffle }}
-          IN_WORKERS: ${{ github.event.inputs.workers || '1000' }}
+          IN_WORKERS: ${{ github.event.inputs.workers || '3000' }}
           IN_TIMEOUT: ${{ github.event.inputs.timeout || '3s' }}
           IN_LIMIT: ${{ github.event.inputs.limit || '0' }}
           SHARD_IDX: ${{ matrix.shard }}
@@ -428,7 +436,7 @@ jobs:
             SHUFFLE_ARG="-shuffle=true"
           fi
           WORKERS_NUM=$(echo "$IN_WORKERS" | tr -cd '0-9')
-          [ -z "$WORKERS_NUM" ] && WORKERS_NUM=1000
+          [ -z "$WORKERS_NUM" ] && WORKERS_NUM=3000
           LIMIT_NUM=$(echo "$IN_LIMIT" | tr -cd '0-9')
           [ -z "$LIMIT_NUM" ] && LIMIT_NUM=0
           TIMEOUT_CLEAN=$(echo "$IN_TIMEOUT" | tr -cd '0-9a-zA-Z.')
@@ -484,10 +492,15 @@ jobs:
           MY_PAT: ${{ secrets.MY_PAT }}
           PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
           IN_TIMEOUT: ${{ github.event.inputs.timeout || '3s' }}
+          RAW_OUTPUT_MODE: ${{ github.event.inputs.output_mode || 'merge' }}
         run: |
           echo "[*] 开始汇总各分片扫描结果..."
           TIMEOUT_CLEAN=$(echo "$IN_TIMEOUT" | tr -cd '0-9a-zA-Z.')
           [ -z "$TIMEOUT_CLEAN" ] && TIMEOUT_CLEAN="3s"
+          OUTPUT_MODE=$(echo "$RAW_OUTPUT_MODE" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+          [ -z "$OUTPUT_MODE" ] && OUTPUT_MODE="merge"
+          echo "[*] 输出结果处理模式: $OUTPUT_MODE"
+
           mkdir -p temp_merge
           : > temp_merge/raw_all.txt
           if [ -d "shards" ]; then
@@ -511,35 +524,43 @@ jobs:
             fi
           fi
 
-          # 对历史存活代理池进行快速保活复测，自动剔除失效死节点与历史假活
-          : > temp_merge/rechecked_old.txt
-          if [ -s "${WORK_REPO}/all_results.txt" ] && [ -f "$SCANNER_SRC" ]; then
-            OLD_COUNT=$(grep -v '^\s*$' "${WORK_REPO}/all_results.txt" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
-            echo "[*] 检测到历史存活池共 ${OLD_COUNT} 条，正在执行保活复测..."
-            if go run "$SCANNER_SRC" \
-              -input "${WORK_REPO}/all_results.txt" \
-              -output "temp_merge/rechecked_old.txt" \
-              -recheck \
-              -silent \
-              -dict none \
-              -shuffle=false \
-              -workers 1000 \
-              -timeout "$TIMEOUT_CLEAN"; then
-              KEPT_COUNT=$(grep -v '^\s*$' temp_merge/rechecked_old.txt 2>/dev/null | wc -l | tr -d ' ' || echo 0)
-              echo "[*] 历史代理保活复测完成: 留存真活 ${KEPT_COUNT} / ${OLD_COUNT} 条"
-            else
-              echo "[!] 复测执行异常，安全回退保留原有历史列表"
-              cp "${WORK_REPO}/all_results.txt" temp_merge/rechecked_old.txt
+          if [ "$OUTPUT_MODE" = "overwrite" ]; then
+            echo "[*] 选定保存模式: overwrite (覆盖最新) -> 仅保留本次扫描新结果，丢弃历史存活池"
+            cp temp_merge/new_alive.txt temp_merge/final_all.txt
+            FINAL_COUNT=$NEW_COUNT
+            echo "[*] 覆盖后当前总存活代理数: $FINAL_COUNT"
+          else
+            echo "[*] 选定保存模式: merge (合并去重) -> 正在对历史存活池保活复测并与新结果合并..."
+            # 对历史存活代理池进行快速保活复测，自动剔除失效死节点与历史假活
+            : > temp_merge/rechecked_old.txt
+            if [ -s "${WORK_REPO}/all_results.txt" ] && [ -f "$SCANNER_SRC" ]; then
+              OLD_COUNT=$(grep -v '^\s*$' "${WORK_REPO}/all_results.txt" 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+              echo "[*] 检测到历史存活池共 ${OLD_COUNT} 条，正在执行保活复测..."
+              if go run "$SCANNER_SRC" \
+                -input "${WORK_REPO}/all_results.txt" \
+                -output "temp_merge/rechecked_old.txt" \
+                -recheck \
+                -silent \
+                -dict none \
+                -shuffle=false \
+                -workers 1000 \
+                -timeout "$TIMEOUT_CLEAN"; then
+                KEPT_COUNT=$(grep -v '^\s*$' temp_merge/rechecked_old.txt 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+                echo "[*] 历史代理保活复测完成: 留存真活 ${KEPT_COUNT} / ${OLD_COUNT} 条"
+              else
+                echo "[!] 复测执行异常，安全回退保留原有历史列表"
+                cp "${WORK_REPO}/all_results.txt" temp_merge/rechecked_old.txt
+              fi
             fi
+
+            # 合并【本次新发现】+【历史仍存活】并严格去重
+            cat temp_merge/new_alive.txt temp_merge/rechecked_old.txt | grep -v '^\s*$' | sort -u > temp_merge/final_all.txt || : > temp_merge/final_all.txt
+            FINAL_COUNT=$(wc -l < temp_merge/final_all.txt | tr -d ' ')
+            echo "[*] 合并去重后当前总存活代理数: $FINAL_COUNT"
           fi
 
-          # 合并【本次新发现】+【历史仍存活】并严格去重
-          cat temp_merge/new_alive.txt temp_merge/rechecked_old.txt | grep -v '^\s*$' | sort -u > temp_merge/final_all.txt || : > temp_merge/final_all.txt
-          FINAL_COUNT=$(wc -l < temp_merge/final_all.txt | tr -d ' ')
-          echo "[*] 合并去重后当前总存活代理数: $FINAL_COUNT"
-
           if [ "$FINAL_COUNT" -eq 0 ]; then
-            echo "[!] 本次扫描与复测存活总数均为 0，触发保护机制：保留原有结果文件不覆盖，跳过提交。"
+            echo "[!] 本次存活总数为 0，触发保护机制：保留原有结果文件不覆盖，跳过提交。"
             exit 0
           fi
 
@@ -562,7 +583,7 @@ jobs:
             else
               TARGET_BRANCH="${GITHUB_REF#refs/heads/}"
             fi
-            git commit -m "Auto-update multi-protocol proxy results (${NOW_UTC}, alive: ${FINAL_COUNT}) [skip ci]"
+            git commit -m "Auto-update multi-protocol proxy results (${NOW_UTC}, alive: ${FINAL_COUNT}, mode: ${OUTPUT_MODE}) [skip ci]"
             for attempt in 1 2 3; do
               git pull --rebase origin "$TARGET_BRANCH" 2>/dev/null || true
               if git push origin "$TARGET_BRANCH"; then
