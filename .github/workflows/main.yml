@@ -11,7 +11,7 @@ on:
           - '4 台机器 (默认稳妥，推荐 50 万以下)'
           - '8 台机器 (极速并发，推荐 50 万以上)'
           - 'custom (使用下方自定义输入)'
-        default: '4 台机器 (默认稳妥，推荐 50 万以下)'
+        default: 'custom (使用下方自定义输入)'
       custom_shards:
         description: '自定义分片机器数 (选 custom 时生效，范围 1~20)'
         required: false
@@ -46,7 +46,7 @@ on:
           - 'extended (丰富扩展: 包含 25+ 组常用默认口令)'
           - 'full (完整 329 组)'
           - 'none (仅免密探测: 不尝试任何弱口令)'
-        default: 'fast (默认精简: 优先免密 + 5 组核心高频弱密，共 6 组)'
+        default: 'full (完整 329 组)'
       fetch_online:
         description: '是否聚合全网公开代理源 (自动拉取数万个公开代理并入待测队列)'
         required: false
